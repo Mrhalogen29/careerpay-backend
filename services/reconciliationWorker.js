@@ -27,8 +27,6 @@ export async function startReconciliationSchedule() {
     },
   );
 
-  console.log("Reconciliation repeatable jobs:", JSON.stringify(jobs, null, 2));
-
   console.log("Reconciliation schedule started — runs every 5 minutes");
 }
 

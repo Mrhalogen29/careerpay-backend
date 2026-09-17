@@ -1162,6 +1162,7 @@ class PayrollService {
     companyId,
     compensationItems,
     userId,
+    
   ) {
     const session = await mongoose.startSession();
 
