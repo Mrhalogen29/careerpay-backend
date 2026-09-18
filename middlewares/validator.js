@@ -47,7 +47,7 @@ export const isValidPhone = (phone) => {
   }
 
   try {
-    const phoneNumber = parsePhoneNumberFromString(phone);
+    const phoneNumber = parsePhoneNumberFromString(phone, "NG");
 
     return phoneNumber ? phoneNumber.isValid() : false;
   } catch (error) {
