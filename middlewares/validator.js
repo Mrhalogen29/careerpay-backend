@@ -1,22 +1,23 @@
-import { validationResult } from 'express-validator';
+import { validationResult } from "express-validator";
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 
 /**
  * Validate request and return errors if any
  */
 export const validate = (req, res, next) => {
   const errors = validationResult(req);
-  
+
   if (!errors.isEmpty()) {
     return res.status(400).json({
       success: false,
-      message: 'Validation failed',
-      errors: errors.array().map(err => ({
+      message: "Validation failed",
+      errors: errors.array().map((err) => ({
         field: err.param,
-        message: err.msg
-      }))
+        message: err.msg,
+      })),
     });
   }
-  
+
   next();
 };
 
@@ -38,13 +39,21 @@ export const isStrongPassword = (password) => {
   return passwordRegex.test(password);
 };
 
-// Validate Nigerian phone number
-export const isValidNigerianPhone = (phone) => {
-  // Format: 080xxxxxxxx or +234xxxxxxxxxx
-  const phoneRegex = /^\+234[7-9][0-1]\d{8}$/;
-  return phoneRegex.test(phone);
-};
+// Validate phone number
 
+export const isValidPhone = (phone) => {
+  if (!phone || typeof phone !== "string") {
+    return false;
+  }
+
+  try {
+    const phoneNumber = parsePhoneNumberFromString(phone);
+
+    return phoneNumber ? phoneNumber.isValid() : false;
+  } catch (error) {
+    return false;
+  }
+};
 // Validate amount (positive number)
 export const isValidAmount = (amount) => {
   return !isNaN(amount) && amount > 0;
@@ -64,10 +73,10 @@ export const isValidObjectId = (id) => {
  * Sanitize input
  */
 export const sanitizeInput = (input) => {
-  if (typeof input !== 'string') return input;
-  
+  if (typeof input !== "string") return input;
+
   // Remove HTML tags and trim whitespace
-  return input.replace(/<[^>]*>/g, '').trim();
+  return input.replace(/<[^>]*>/g, "").trim();
 };
 
 /**
@@ -76,20 +85,20 @@ export const sanitizeInput = (input) => {
 export const validateFields = (requiredFields) => {
   return (req, res, next) => {
     const missingFields = [];
-    
+
     for (const field of requiredFields) {
       if (!req.body[field]) {
         missingFields.push(field);
       }
     }
-    
+
     if (missingFields.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Missing required fields: ${missingFields.join(', ')}`
+        message: `Missing required fields: ${missingFields.join(", ")}`,
       });
     }
-    
+
     next();
   };
 };
@@ -100,16 +109,16 @@ export const validateFields = (requiredFields) => {
 export const validateQuery = (allowedParams) => {
   return (req, res, next) => {
     const invalidParams = Object.keys(req.query).filter(
-      param => !allowedParams.includes(param)
+      (param) => !allowedParams.includes(param),
     );
-    
+
     if (invalidParams.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Invalid query parameters: ${invalidParams.join(', ')}`
+        message: `Invalid query parameters: ${invalidParams.join(", ")}`,
       });
     }
-    
+
     next();
   };
 };
@@ -119,21 +128,21 @@ export const validateQuery = (allowedParams) => {
  */
 export const validatePagination = (req, res, next) => {
   const { page, limit } = req.query;
-  
+
   if (page && (isNaN(page) || page < 1)) {
     return res.status(400).json({
       success: false,
-      message: 'Page must be a positive number'
+      message: "Page must be a positive number",
     });
   }
-  
+
   if (limit && (isNaN(limit) || limit < 1 || limit > 100)) {
     return res.status(400).json({
       success: false,
-      message: 'Limit must be between 1 and 100'
+      message: "Limit must be between 1 and 100",
     });
   }
-  
+
   next();
 };
 
@@ -145,26 +154,26 @@ export const validateFileUpload = (allowedTypes, maxSize = 5 * 1024 * 1024) => {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: 'No file uploaded'
+        message: "No file uploaded",
       });
     }
-    
+
     // Check file type
     if (!allowedTypes.includes(req.file.mimetype)) {
       return res.status(400).json({
         success: false,
-        message: `Invalid file type. Allowed types: ${allowedTypes.join(', ')}`
+        message: `Invalid file type. Allowed types: ${allowedTypes.join(", ")}`,
       });
     }
-    
+
     // Check file size
     if (req.file.size > maxSize) {
       return res.status(400).json({
         success: false,
-        message: `File size exceeds maximum allowed size of ${maxSize / (1024 * 1024)}MB`
+        message: `File size exceeds maximum allowed size of ${maxSize / (1024 * 1024)}MB`,
       });
     }
-    
+
     next();
   };
 };

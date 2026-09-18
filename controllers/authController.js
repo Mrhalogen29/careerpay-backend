@@ -3,7 +3,7 @@ import authService from "../services/authService.js";
 import {
   isValidEmail,
   isStrongPassword,
-  isValidNigerianPhone,
+  isValidPhone,
 } from "../middlewares/validator.js";
 
 class AuthController {
@@ -42,10 +42,10 @@ class AuthController {
         });
       }
 
-      if (!isValidNigerianPhone(company.phone)) {
+      if (!isValidPhone(company.phone)) {
         return res.status(400).json({
           success: false,
-          message: "Company phone number must be in +234XXXXXXXX format",
+          message: "Invalid company phone number",
         });
       }
 
@@ -66,11 +66,10 @@ class AuthController {
         });
       }
 
-      // Validate user phone number (+234 format) ---
-      if (!isValidNigerianPhone(user.phone)) {
+      if (!isValidPhone(user.phone)) {
         return res.status(400).json({
           success: false,
-          message: "Phone number must be in +234XXXXXXXX format",
+          message: "Invalid phone number",
         });
       }
 
