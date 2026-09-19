@@ -638,15 +638,27 @@ class PayrollController {
         .sort({ createdAt: -1 })
         .lean();
 
-      // Summary counts
+      //summary
+
+      const statusCounts = await PaymentTransaction.aggregate([
+        { $match: query },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]);
+
       const summary = {
-        total: transactions.length,
-        success: transactions.filter((t) => t.status === "success").length,
-        failed: transactions.filter((t) => t.status === "failed").length,
-        pending: transactions.filter((t) => t.status === "pending").length,
-        processing: transactions.filter((t) => t.status === "processing")
-          .length,
+        total,
+        success: 0,
+        failed: 0,
+        pending: 0,
+        processing: 0,
+        cancelled: 0,
       };
+
+      statusCounts.forEach(({ _id, count }) => {
+        if (summary[_id] !== undefined) {
+          summary[_id] = count;
+        }
+      });
 
       res.status(200).json({
         success: true,
@@ -665,6 +677,7 @@ class PayrollController {
    * Get all payment transactions for a company (tracking page)
    * GET /api/payroll/transactions
    */
+
   async getAllTransactions(req, res) {
     try {
       const companyId = req.user.company;
