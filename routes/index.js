@@ -59,6 +59,6 @@ router.post("/payroll/monnify-webhook", payrollController.handleMonnifyWebhook);
 // Feature-gated routes — require active subscription
 router.use("/payroll", protect, requireSubscription("payroll"), payrollRoutes);
 router.use("/financing", requireSubscription("financing"), financingRoutes);
-router.use("/equity", requireSubscription("esop"), equityRoutes);
+router.use("/equity", equityRoutes);
 
 export default router;

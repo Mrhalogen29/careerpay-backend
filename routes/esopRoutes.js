@@ -1,12 +1,14 @@
 import express from "express";
 import equityController from "../controllers/equityController.js";
+import requireSubscription from "../middlewares/requireSubscription.js";
 import { protect, isHROrAbove, isFounderOrAdmin, requireVerified, verifyEmployeeOwnership } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(protect);
-router.use(requireVerified)
+router.use(requireVerified);
+router.use(requireSubscription("esop"));
 
 /**
  * @route   GET /api/equity/my-equity
@@ -14,6 +16,8 @@ router.use(requireVerified)
  * @access  Private (All employees)
  */
 router.get("/my-equity", equityController.getMyEquity);
+router.get("/my-grants/:id", equityController.getMyGrant);
+router.post("/my-grants/:id/respond", equityController.respondToGrant);
 
 /**
  * @route   GET /api/equity/overview

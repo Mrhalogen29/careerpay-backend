@@ -93,6 +93,15 @@ const equityGrantSchema = new mongoose.Schema(
       min: 0,
     },
 
+    sharesVested: {
+      type: Number,
+      min: 0,
+      default: function () {
+        if (this.status === "fully_vested") return this.totalShares;
+        return (this.vestingSchedule || []).reduce((total, milestone) => total + (milestone.isProcessed ? milestone.sharesVested : 0), 0);
+      },
+    },
+
     sharesExercised: {
       type: Number,
       default: 0,
@@ -102,10 +111,13 @@ const equityGrantSchema = new mongoose.Schema(
     vestingSchedule: [vestingScheduleSchema],
     status: {
       type: String,
-      enum: ["active", "fully_vested", "terminated", "cancelled"],
-      default: "active",
+      enum: ["pending", "declined", "active", "fully_vested", "terminated", "cancelled"],
+      default: "pending",
     },
 
+    termsAcknowledgedAt: Date,
+    respondedAt: Date,
+    employeeDecision: { type: String, enum: ["accepted", "declined"] },
     notes: String,
   },
   {

@@ -3,6 +3,38 @@ import Employee from "../models/employeeModel.js";
 import EquityGrant from "../models/esopModel.js"
 
 class EquityController {
+  async getMyGrant(req, res) {
+    try {
+      const employee = await Employee.findOne({ user: req.user.id, company: req.user.company });
+      const grant = employee && await EquityGrant.findOne({ _id: req.params.id, employee: employee._id, company: req.user.company });
+      if (!grant) return res.status(404).json({ success: false, message: "Grant not found" });
+      return res.json({ success: true, data: grant });
+    } catch {
+      return res.status(400).json({ success: false, message: "Unable to load grant" });
+    }
+  }
+
+  async respondToGrant(req, res) {
+    const { decision, termsAcknowledged } = req.body;
+    if (termsAcknowledged !== true || !["accepted", "declined"].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Read and acknowledge the grant terms before choosing accept or decline." });
+    }
+    try {
+      const employee = await Employee.findOne({ user: req.user.id, company: req.user.company });
+      if (!employee) return res.status(404).json({ success: false, message: "Employee not found" });
+      const now = new Date();
+      const grant = await EquityGrant.findOneAndUpdate(
+        { _id: req.params.id, employee: employee._id, company: req.user.company, status: "pending" },
+        { $set: { status: decision === "accepted" ? "active" : "declined", employeeDecision: decision, termsAcknowledgedAt: now, respondedAt: now } },
+        { new: true, runValidators: true },
+      );
+      if (!grant) return res.status(409).json({ success: false, message: "This grant is unavailable or has already been responded to. Reopen it to see its current status." });
+      return res.json({ success: true, data: grant });
+    } catch {
+      return res.status(400).json({ success: false, message: "Unable to save your grant decision" });
+    }
+  }
+
   /**
    * Create equity grant for an employee
    * POST /api/equity/grants
@@ -258,7 +290,12 @@ class EquityController {
       const companyId = req.user.company;
       const userId = req.user.id;
       const { id } = req.params;
-      const { reason } = req.body;
+      const { reason, permanent } = req.body;
+
+      if (permanent === true) {
+        const grant = await vestingService.deleteEquityGrant(id, companyId, userId, reason);
+        return res.status(200).json({ success: true, deleted: true, message: "Equity grant deleted permanently", data: grant });
+      }
 
       if (!reason) {
         return res.status(400).json({

@@ -1,6 +1,16 @@
 import EquityGrant from "../models/esopModel.js";
 import Employee from "../models/employeeModel.js";
 import Audit from "../models/auditModel.js";
+import Notification from "../models/notificationModel.js";
+
+function vestedSharesFor(grant) {
+  const vested = Number.isFinite(grant.sharesVested)
+    ? grant.sharesVested
+    : grant.status === "fully_vested"
+      ? grant.totalShares
+      : (grant.vestingSchedule || []).reduce((total, milestone) => total + (milestone.isProcessed ? milestone.sharesVested : 0), 0);
+  return Math.min(grant.totalShares, Math.max(0, vested));
+}
 
 class VestingService {
   /**
@@ -117,6 +127,7 @@ class VestingService {
 
       // Create equity grant
       const equityGrant = await EquityGrant.create({
+        status: "pending",
         company: companyId,
         employee: employeeId,
         grantType,
@@ -130,6 +141,13 @@ class VestingService {
         currentFMV,
         vestingSchedule,
         notes,
+      });
+
+      await Notification.create({
+        company: companyId, user: employee.user, type: "equity",
+        title: "You have a new equity grant",
+        message: `Review your grant of ${totalShares.toLocaleString()} shares and accept or decline.`,
+        link: `grant-acceptance:${equityGrant._id}`,
       });
 
       // Log audit
@@ -320,7 +338,7 @@ class VestingService {
       const grants = await EquityGrant.find({
         company: companyId,
         employee: employeeId,
-        status: { $in: ["active", "fully_vested"] },
+        status: { $in: ["pending", "active", "fully_vested"] },
       })
         .sort({ grantDate: -1 })
         .lean();
@@ -334,9 +352,14 @@ class VestingService {
       };
 
       for (const grant of grants) {
+        grant.sharesVested = vestedSharesFor(grant);
+        const sharesUnvested = Math.max(0, grant.totalShares - grant.sharesVested);
+        const vestingProgress = grant.totalShares > 0
+          ? Number(((grant.sharesVested / grant.totalShares) * 100).toFixed(2))
+          : 0;
         summary.totalGranted += grant.totalShares;
         summary.totalVested += grant.sharesVested;
-        summary.totalUnvested += grant.totalShares - grant.sharesVested;
+        summary.totalUnvested += sharesUnvested;
         summary.totalExercised += grant.sharesExercised || 0;
 
         // Find next vesting date
@@ -347,17 +370,30 @@ class VestingService {
         summary.grants.push({
           _id: grant._id,
           grantType: grant.grantType,
+          grantDate: grant.grantDate,
+          vestingStartDate: grant.vestingStartDate,
+          vestingPeriodMonths: grant.vestingPeriodMonths,
+          cliffMonths: grant.cliffMonths,
+          vestingFrequency: grant.vestingFrequency,
           totalShares: grant.totalShares,
           sharesVested: grant.sharesVested,
-          sharesUnvested: grant.totalShares - grant.sharesVested,
-          vestingProgress: (
-            (grant.sharesVested / grant.totalShares) *
-            100
-          ).toFixed(2),
+          sharesUnvested,
+          sharesExercised: grant.sharesExercised || 0,
+          strikePrice: grant.strikePrice ?? null,
+          currentFMV: grant.currentFMV ?? null,
+          vestingProgress,
           nextVestingDate: nextVesting ? nextVesting.vestingDate : null,
           nextVestingShares: nextVesting ? nextVesting.sharesVested : null,
-          grantDate: grant.grantDate,
           status: grant.status,
+          employeeDecision: grant.employeeDecision ?? null,
+          respondedAt: grant.respondedAt ?? null,
+          vestingSchedule: (grant.vestingSchedule || []).map((milestone) => ({
+            vestingDate: milestone.vestingDate,
+            sharesVested: milestone.sharesVested,
+            cumulativeVested: milestone.cumulativeVested,
+            isProcessed: milestone.isProcessed,
+            processedAt: milestone.processedAt ?? null,
+          })),
         });
       }
 
@@ -386,10 +422,11 @@ class VestingService {
       };
 
       for (const grant of grants) {
+        const sharesVested = vestedSharesFor(grant);
         overview.totalSharesGranted += grant.totalShares;
-        overview.totalSharesVested += grant.sharesVested;
-        overview.totalSharesUnvested += grant.totalShares - grant.sharesVested;
-        overview.totalEmployeesWithEquity.add(grant.employee._id.toString());
+        overview.totalSharesVested += sharesVested;
+        overview.totalSharesUnvested += grant.totalShares - sharesVested;
+        if (grant.employee?._id) overview.totalEmployeesWithEquity.add(grant.employee._id.toString());
 
         // Count by type
         overview.grantsByType[grant.grantType] =
@@ -424,6 +461,15 @@ class VestingService {
       }
 
       const before = { ...grant.toObject() };
+
+      for (const field of ["strikePrice", "currentFMV"]) {
+        if (updateData[field] !== undefined && (typeof updateData[field] !== "number" || !Number.isFinite(updateData[field]) || updateData[field] < 0)) {
+          throw new Error(field + " must be a non-negative number");
+        }
+      }
+      if (updateData.notes !== undefined && (typeof updateData.notes !== "string" || updateData.notes.length > 5000)) throw new Error("Notes must be text up to 5000 characters");
+      if (updateData.status !== undefined && updateData.status !== grant.status && !["active", "fully_vested", "terminated", "cancelled"].includes(updateData.status)) throw new Error("Invalid grant status");
+      if (["pending", "declined"].includes(grant.status) && updateData.status !== undefined && updateData.status !== grant.status && !["terminated", "cancelled"].includes(updateData.status)) throw new Error("Only the employee can accept a pending grant");
 
       // Update allowed fields
       if (updateData.currentFMV !== undefined)
@@ -460,6 +506,25 @@ class VestingService {
   /**
    * Terminate equity grant (when employee leaves)
    */
+  async deleteEquityGrant(grantId, companyId, userId, reason) {
+    if (typeof reason !== "string" || !reason.trim() || reason.trim().length > 2000) {
+      throw new Error("A deletion reason of up to 2000 characters is required");
+    }
+    const grant = await EquityGrant.findOne({ _id: grantId, company: companyId });
+    if (!grant) throw new Error("Equity grant not found");
+    // Retain the grant snapshot and administrator's reason in the audit trail.
+    await Audit.log({
+      company: companyId, user: userId, action: "equity_grant_deleted",
+      module: "equity", resourceType: "equity_grant", resourceId: grant._id,
+      changes: { before: grant.toObject(), after: null },
+      details: { reason: reason.trim(), permanent: true },
+      status: "success", severity: "high",
+    });
+    const result = await EquityGrant.deleteOne({ _id: grantId, company: companyId });
+    if (result.deletedCount !== 1) throw new Error("Grant could not be deleted; refresh and try again");
+    return { _id: grant._id };
+  }
+
   async terminateEquityGrant(grantId, companyId, userId, reason) {
     try {
       const grant = await EquityGrant.findOne({
