@@ -1,6 +1,7 @@
 import "dotenv/config";
 import connectDB from "./config/db.js";
 import app from "./app.js";
+import { QUEUE_ENABLED } from "./config/paymentQueue.js";
 import worker from "./services/paymentWorker.js";
 import reconciliationWorker, {
   startReconciliationSchedule,
@@ -8,17 +9,22 @@ import reconciliationWorker, {
 
 const startServer = async () => {
   try {
-    // Connect to database
     await connectDB();
 
-    // Start payment worker — processes payroll payment jobs from queue
-    // Runs continuously in background alongside the API server
-    console.log("Payment worker started and listening for jobs...");
+    if (QUEUE_ENABLED) {
+      console.log("Payment worker started and listening for jobs...");
+    } else {
+      console.log(
+        "Payment queue disabled (ENABLE_QUEUE is not 'true'): payments run directly, Redis not used.",
+      );
+    }
 
-    await startReconciliationSchedule(); // ← ADD
-    console.log("Reconciliation worker started...");
+    // Does nothing when the queue is disabled
+    await startReconciliationSchedule();
+    if (QUEUE_ENABLED) {
+      console.log("Reconciliation worker started...");
+    }
 
-    // Start listening
     const PORT = process.env.PORT || 5000;
     const server = app.listen(PORT, () => {
       console.log(
@@ -38,21 +44,18 @@ const startServer = async () => {
       }
     });
 
-    // Handle unhandled promise rejections
     process.on("unhandledRejection", (err) => {
       console.error(`Unhandled Rejection: ${err.message}`);
       server.close(() => process.exit(1));
     });
 
-    // Handle SIGTERM — graceful shutdown
-    // Close worker before shutting down so no jobs are lost mid-processing
     process.on("SIGTERM", async () => {
       console.log("SIGTERM received. Shutting down gracefully...");
 
-      // Close worker first — waits for current job to finish before stopping
-      await worker.close();
+      // Both are null when the queue is disabled, so use ?. to skip them
+      await worker?.close();
       console.log("Payment worker closed");
-      await reconciliationWorker.close();
+      await reconciliationWorker?.close();
       console.log("Reconciliation worker closed");
 
       server.close(() => {

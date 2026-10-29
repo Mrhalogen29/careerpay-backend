@@ -5,15 +5,17 @@ import {
   isStrongPassword,
   isValidPhone,
 } from "../middlewares/validator.js";
+import subscriptionPurchaseService from "../services/subscriptionPurchaseService.js";
 
 class AuthController {
   /**
    * Register new company and founder
    * POST /api/auth/register
    */
+
   async register(req, res) {
     try {
-      const { company, user } = req.body;
+      const { company, user, claimCode } = req.body;
 
       // Validate required fields
       if (
@@ -72,6 +74,29 @@ class AuthController {
           message: "Invalid phone number",
         });
       }
+      // Only a founder can register a company. Employees are added by their
+      // founder from the Add Employees page.
+      const requestedRole = String(user.role || "founder")
+        .trim()
+        .toLowerCase();
+      if (requestedRole !== "founder") {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only a company founder can register a company. Ask your founder to add you as an employee.",
+        });
+      }
+
+      // Sign-up requires a paid subscription. Check the code BEFORE creating
+      // anything, so a bad code never leaves a half-created company behind.
+      if (!claimCode || typeof claimCode !== "string") {
+        return res.status(402).json({
+          success: false,
+          message:
+            "A paid subscription is required before you can create an account.",
+        });
+      }
+      await subscriptionPurchaseService.assertClaimable(claimCode.trim());
 
       const ipAddress = req.ip || req.connection.remoteAddress;
       const userAgent = req.get("user-agent");
@@ -81,6 +106,7 @@ class AuthController {
         user,
         ipAddress,
         userAgent,
+        claimCode.trim(),
       );
 
       res.status(201).json({
@@ -130,10 +156,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Resend verification email
-   * POST /api/auth/resend-verification
-   */
   async resendVerification(req, res) {
     try {
       const companyId = req.user.company;
@@ -153,10 +175,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Login user
-   * POST /api/auth/login
-   */
   async login(req, res) {
     try {
       const { email, password } = req.body;
@@ -192,10 +210,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Refresh access token
-   * POST /api/auth/refresh-token
-   */
   async refreshToken(req, res) {
     try {
       const { refreshToken } = req.body;
@@ -223,24 +237,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Logout user
-   * POST /api/auth/logout
-   */
-
-  /**
-   * Logout — designed to ALWAYS succeed (idempotent), per BRD LGT-004/LGT-005:
-   * an expired, invalid, or missing token must still return 200, since the
-   * user's intent (log me out) is already accomplished either way.
-   * POST /api/auth/logout
-   */
-
-  /**
-   * Logout — designed to ALWAYS succeed (idempotent), per BRD LGT-004/LGT-005:
-   * an expired, invalid, or missing token must still return 200, since the
-   * user's intent (log me out) is already accomplished either way.
-   * POST /api/auth/logout
-   */
   async logout(req, res) {
     try {
       const authHeader = req.headers.authorization;
@@ -252,10 +248,6 @@ class AuthController {
       let userId;
       let companyId;
 
-      // Try to recover the user identity even from an expired token — we
-      // still want to blacklist it and log the event. A malformed or
-      // tampered token will fail here too, and that's fine: we just skip
-      // straight to returning success below.
       if (token) {
         try {
           const decoded = jwt.verify(token, process.env.JWT_SECRET, {
@@ -271,7 +263,6 @@ class AuthController {
       const ipAddress = req.ip || req.connection?.remoteAddress;
       const userAgent = req.get("user-agent");
 
-      // Best-effort: never let an internal failure here block the 200 response.
       try {
         if (userId) {
           await authService.logout(
@@ -283,8 +274,6 @@ class AuthController {
             userAgent,
           );
         } else if (token) {
-          // We have a token but couldn't extract a user from it — still
-          // attempt to blacklist the raw token string defensively.
           await authService.revokeAccessToken(token, null, "logout");
         }
       } catch (innerError) {
@@ -307,10 +296,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Request password reset
-   * POST /api/auth/forgot-password
-   */
   async forgotPassword(req, res) {
     try {
       const { email } = req.body;
@@ -322,7 +307,6 @@ class AuthController {
         });
       }
 
-      // Validate user email ---
       if (!isValidEmail(email)) {
         return res.status(400).json({
           success: false,
@@ -334,7 +318,7 @@ class AuthController {
       res.status(200).json({
         success: true,
         message: result.message,
-        // Remove resetToken in production
+
         ...(process.env.NODE_ENV !== "production" && {
           resetToken: result.resetToken,
         }),
@@ -348,10 +332,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Reset password with token
-   * POST /api/auth/reset-password
-   */
   async resetPassword(req, res) {
     try {
       const { resetToken, newPassword } = req.body;
@@ -363,7 +343,6 @@ class AuthController {
         });
       }
 
-      // Optional: enforce strength here too (defensive programming)
       if (!isStrongPassword(newPassword)) {
         return res.status(400).json({
           success: false,
@@ -402,10 +381,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Change password (when logged in)
-   * POST /api/auth/change-password
-   */
   async changePassword(req, res) {
     try {
       const { currentPassword, newPassword, refreshToken } = req.body;
@@ -419,7 +394,6 @@ class AuthController {
         });
       }
 
-      // Optional: enforce strength here too (defensive programming)
       if (!isStrongPassword(newPassword)) {
         return res.status(400).json({
           success: false,
@@ -461,10 +435,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Get current user profile
-   * GET /api/auth/me
-   */
   async getCurrentUser(req, res) {
     try {
       const userId = req.user.id;
@@ -483,10 +453,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Update Profile
-   * PUT /api/auth/me
-   */
   async updateProfile(req, res) {
     try {
       const userId = req.user.id;
@@ -525,10 +491,6 @@ class AuthController {
     }
   }
 
-  /**
-   * Verify token validity
-   * GET /api/auth/verify-token
-   */
   async verifyToken(req, res) {
     try {
       const token = req.headers.authorization?.split(" ")[1];
@@ -540,7 +502,7 @@ class AuthController {
           expiresAt = new Date(decoded.exp * 1000).toISOString();
         }
       }
-      // If request reaches here, token is valid (middleware already verified)
+
       res.status(200).json({
         success: true,
         message: "Token is valid",

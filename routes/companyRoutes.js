@@ -154,11 +154,12 @@ router.put("/settings", protect, isFounderOrAdmin, async (req, res) => {
       });
     }
 
+    const snapshot = company.toObject();
     const before = {
-      payrollSettings: company.payrollSettings,
-      baseCurrency: company.baseCurrency,
-      bankDetails: company.bankDetails,
-      address: company.address,
+      payrollSettings: snapshot.payrollSettings,
+      baseCurrency: snapshot.baseCurrency,
+      bankDetails: snapshot.bankDetails,
+      address: snapshot.address,
     };
 
     // Update settings
@@ -178,16 +179,52 @@ router.put("/settings", protect, isFounderOrAdmin, async (req, res) => {
 
       company.markModified("address");
     }
-    if (payrollSettings) {
-      company.payrollSettings = {
-        ...company.payrollSettings.toObject(),
-        ...payrollSettings,
-      };
-      // Tell Mongoose this nested object changed — it doesn't always detect spread updates
-      company.markModified("payrollSettings");
+
+    if (payrollSettings && typeof payrollSettings === "object") {
+      // Only these keys can be changed from the Settings page
+      const ALLOWED_PAYROLL_KEYS = [
+        "paymentDay",
+        "payFrequency",
+        "enableAutomaticTax",
+        "enablePension",
+        "payDayRule",
+        "payWeekday",
+        "cutoffDay",
+        "multiCurrencyEnabled",
+        "autoCalculateOnCutoff",
+        "autoApprove",
+        "lockAfterApproval",
+        "allowRetroactiveAdjustments",
+        "approverRole",
+        "dataRetentionMonths",
+      ];
+      ALLOWED_PAYROLL_KEYS.forEach((key) => {
+        if (payrollSettings[key] !== undefined) {
+          company.set(`payrollSettings.${key}`, payrollSettings[key]);
+        }
+      });
     }
 
-    if (baseCurrency) {
+    if (baseCurrency && baseCurrency !== company.baseCurrency) {
+      // Changing the base currency while staff are paid in another one would
+      // leave payroll inconsistent, unless multi-currency payroll is on.
+
+      const multi =
+        payrollSettings?.multiCurrencyEnabled ??
+        company.payrollSettings?.multiCurrencyEnabled;
+      if (!multi) {
+        const mismatched = await Employee.countDocuments({
+          company: companyId,
+          isDeleted: { $ne: true },
+          "salary.currency": { $ne: baseCurrency },
+        });
+        if (mismatched > 0) {
+          return res.status(400).json({
+            success: false,
+            message: `${mismatched} employee(s) are paid in a different currency. Enable multi-currency payroll or update their salaries first.`,
+          });
+        }
+      }
       company.baseCurrency = baseCurrency;
     }
 

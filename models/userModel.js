@@ -55,6 +55,11 @@ const userSchema = new mongoose.Schema(
       required: true,
     },
 
+    mustChangePassword: {
+      type: Boolean,
+      default: false,
+    },
+
     isActive: {
       type: Boolean,
       default: true,
@@ -73,8 +78,8 @@ const userSchema = new mongoose.Schema(
         createdAt: {
           type: Date,
           default: Date.now,
-        }
-      }
+        },
+      },
     ],
     passwordChangedAt: Date,
     passwordResetToken: String,
@@ -95,7 +100,7 @@ const userSchema = new mongoose.Schema(
 
     loginAttempts: {
       type: Number,
-      default: 0
+      default: 0,
     },
     loginAttemptsWindowStart: Date,
     lockUntil: Date,
@@ -120,11 +125,10 @@ const userSchema = new mongoose.Schema(
       type: String,
       select: false,
     },
-
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 // Hashing Password
@@ -145,14 +149,14 @@ userSchema.methods.changedPasswordAfter = function (JWTTimestamp) {
 
   if (this.passwordChangedAt) {
     const changedTimestamp = Math.floor(
-      this.passwordChangedAt.getTime() / 1000
+      this.passwordChangedAt.getTime() / 1000,
     );
     return JWTTimestamp < changedTimestamp;
   }
   return false;
 };
 
-// Check if password exists in last 3 
+// Check if password exists in last 3
 userSchema.methods.isPasswordInHistory = async function (candidatePassword) {
   if (!this.passwordHistory || this.passwordHistory.length === 0) return false;
   for (const entry of this.passwordHistory) {

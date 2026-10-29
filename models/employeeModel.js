@@ -51,7 +51,7 @@ const employeeSchema = new mongoose.Schema(
       },
       currency: {
         type: String,
-        enum: ["NGN", "USD"],
+        enum: ["NGN", "USD", "GBP", "EUR"],
         default: "NGN",
       },
       payFrequency: {
@@ -81,6 +81,28 @@ const employeeSchema = new mongoose.Schema(
         default: 200000, // Annual tax relief in NGN (₦200,000 + 20% of gross + 1% of gross)
       },
     },
+
+    documents: [
+      {
+        docType: {
+          type: String,
+          enum: ["governmentId", "taxForm"],
+          required: true,
+        },
+        originalName: String, // name the founder's file had, shown in the UI
+        storedName: String, // random name on disk, never user-controlled
+        mimeType: String,
+        size: Number,
+        uploadedAt: { type: Date, default: Date.now },
+      },
+    ],
+
+    // Next of kin (collected on the Add Employee page)
+    nextOfKin: {
+      name: { type: String, trim: true },
+      phone: { type: String, trim: true },
+    },
+
     manager: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Employee",
@@ -96,6 +118,10 @@ const employeeSchema = new mongoose.Schema(
       default: "active",
       index: true,
     },
+
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date },
+
     terminationDate: Date,
     terminationReason: String,
   },

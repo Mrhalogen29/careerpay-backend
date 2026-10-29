@@ -10,7 +10,7 @@ class EmailService {
     console.info("Email service ready");
   }
 
-  // ─── Security Alert ──────────────────────────────────────────────────────────
+  //  Security Alert
 
   /**
    * Send security alert email (login lock / suspicious activity)
@@ -59,17 +59,17 @@ class EmailService {
     return await this.sendEmail(user.email, subject, html);
   }
 
-  // ─── Email Verification ──────────────────────────────────────────────────────
+  //  Email Verification
 
-/**
- * Send email verification link after company registration
- * Called in authService.registerCompany() after account is created
- * Token expires in 24 hours
- */
-async sendVerificationEmail(user, company, verificationToken) {
-  const subject = "✅ Verify Your CareerPay Account";
+  /**
+   * Send email verification link after company registration
+   * Called in authService.registerCompany() after account is created
+   * Token expires in 24 hours
+   */
+  async sendVerificationEmail(user, company, verificationToken) {
+    const subject = "✅ Verify Your CareerPay Account";
 
-  const html = `
+    const html = `
     <!DOCTYPE html>
     <html>
       <head>
@@ -111,10 +111,10 @@ async sendVerificationEmail(user, company, verificationToken) {
     </html>
   `;
 
-  return await this.sendEmail(user.email, subject, html);
-}
+    return await this.sendEmail(user.email, subject, html);
+  }
 
-  // ─── New Device Notification ─────────────────────────────────────────────────
+  // New Device Notification
 
   /**
    * NEW — BRS A.5: Notify user when login detected from an unrecognized device
@@ -173,7 +173,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(user.email, subject, html);
   }
 
-  // ─── Password Reset Confirmation ─────────────────────────────────────────────
+  //  Password Reset Confirmation
 
   /**
    * NEW — BRS AC3-001: Confirmation email after a successful password reset
@@ -236,7 +236,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(user.email, subject, html);
   }
 
-  // ─── Password Change Confirmation ────────────────────────────────────────────
+  // Password Change Confirmation
 
   /**
    * NEW — BRS CHG-010: Confirmation email after a logged-in user changes their password
@@ -302,7 +302,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(user.email, subject, html);
   }
 
-  // ─── Password Reset Request ──────────────────────────────────────────────────
+  //  Password Reset Request
 
   /**
    * Send password reset link email
@@ -363,7 +363,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(user.email, subject, html);
   }
 
-  // ─── Welcome Email ───────────────────────────────────────────────────────────
+  //  Welcome Email
 
   /**
    * Send welcome email to new employee
@@ -413,12 +413,12 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(employee.email, subject, html);
   }
 
-  // ─── Payslip Email ───────────────────────────────────────────────────────────
+  //  Payslip Email
 
   /**
    * Send payslip email to employee
    */
-  async sendPayslipEmail(employee, payslip,currency, pdfAttachment = null) {
+  async sendPayslipEmail(employee, payslip, currency, pdfAttachment = null) {
     const subject = `Payslip for ${this.getMonthName(payslip.payrollPeriod.month)} ${payslip.payrollPeriod.year}`;
 
     const html = `
@@ -446,7 +446,7 @@ async sendVerificationEmail(user, company, verificationToken) {
               <p>Your salary for ${this.getMonthName(payslip.payrollPeriod.month)} ${payslip.payrollPeriod.year} has been processed.</p>
               <div class="summary">
                 <h2>Payment Summary</h2>
-                <p><strong>Gross Salary:</strong> ${this.formatCurrency(payslip.grossSalary,currency)}</p>
+                <p><strong>Gross Salary:</strong> ${this.formatCurrency(payslip.grossSalary, currency)}</p>
                 <p><strong>Total Deductions:</strong> ${this.formatCurrency(payslip.deductions.tax + payslip.deductions.pension + payslip.deductions.nhf, currency)}</p>
                 <p><strong>Net Pay:</strong></p>
                 <p class="amount">${this.formatCurrency(payslip.netSalary, currency)}</p>
@@ -465,7 +465,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(employee.email, subject, html);
   }
 
-  // ─── Vesting Milestone ───────────────────────────────────────────────────────
+  //  Vesting Milestone
 
   /**
    * Send vesting milestone email
@@ -525,7 +525,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(employee.email, subject, html);
   }
 
-  // ─── Financing Approval ──────────────────────────────────────────────────────
+  // Financing Approval
 
   /**
    * Send financing approval email
@@ -575,7 +575,7 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(company.email, subject, html);
   }
 
-  // ─── Repayment Reminder ──────────────────────────────────────────────────────
+  // Repayment Reminder
 
   /**
    * Send repayment reminder email
@@ -622,12 +622,73 @@ async sendVerificationEmail(user, company, verificationToken) {
     return await this.sendEmail(company.email, subject, html);
   }
 
-  // ─── Core Send Helper ────────────────────────────────────────────────────────
+  // Payment Failure Alert
+
+  async sendPaymentFailureEmail(user, { period, currency, failures }) {
+    const esc = (v) =>
+      String(v ?? "").replace(
+        /[&<>"']/g,
+        (c) =>
+          ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          })[c],
+      );
+
+    const subject = `⚠️ ${failures.length} payroll payment(s) failed - ${period}`;
+
+    const rows = failures
+      .map(
+        (f) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #eee;">${esc(f.name)}<br/><small>${esc(f.employeeId)}</small></td>
+          <td style="padding:8px;border-bottom:1px solid #eee;">${this.formatCurrency(f.amount, currency)}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee;">${esc(f.reason)}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px;">${esc(f.reference)}</td>
+        </tr>`,
+      )
+      .join("");
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width:700px;margin:0 auto;padding:20px;">
+            <div style="background:#DC2626;color:white;padding:20px;text-align:center;">
+              <h1>Payroll Payment Failures</h1>
+            </div>
+            <div style="padding:20px;background:#f9f9f9;">
+              <p>Hi ${esc(user.firstName)},</p>
+              <p>${failures.length} payment(s) in the <strong>${esc(period)}</strong> payroll did not go through:</p>
+              <table style="width:100%;border-collapse:collapse;background:white;">
+                <thead>
+                  <tr style="text-align:left;background:#f3f4f6;">
+                    <th style="padding:8px;">Employee</th>
+                    <th style="padding:8px;">Amount</th>
+                    <th style="padding:8px;">Reason</th>
+                    <th style="padding:8px;">Reference</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+              <p>Open the Audit log in CareerPay to review them and retry the failed payments.</p>
+              <p style="font-size:12px;color:#666;">Sent ${new Date().toLocaleString()}</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    return await this.sendEmail(user.email, subject, html);
+  }
 
   /**
    * Send email helper — used by all methods above
    */
-async sendEmail(to, subject, htmlContent) {
+  async sendEmail(to, subject, htmlContent) {
     try {
       const response = await this.client.transactionalEmails.sendTransacEmail({
         sender: {
@@ -647,8 +708,7 @@ async sendEmail(to, subject, htmlContent) {
     }
   }
 
-
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  // Helpers
 
   formatCurrency(amount, currency = "NGN") {
     const symbols = { NGN: "₦", USD: "$" };
@@ -660,8 +720,18 @@ async sendEmail(to, subject, htmlContent) {
 
   getMonthName(month) {
     const months = [
-      "January", "February", "March", "April", "May", "June",
-      "July", "August", "September", "October", "November", "December",
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
     ];
     return months[month - 1];
   }

@@ -6,10 +6,46 @@ import Company from "../models/companyModel.js";
 import Financing from "../models/financingModel.js";
 import Audit from "../models/auditModel.js";
 import PaymentTransaction from "../models/paymentTransactionModel.js";
+import EmployeeLoan from "../models/employeeLoanModel.js";
+import subscriptionService from "./subscriptionService.js";
 import taxCalculationService from "./taxCalculationService.js";
 
-// Helper: converts month number to readable name
-// e.g. 2 -> "February", 12 -> "December"
+/**
+ * Send one payment to BullMQ when the queue is enabled (ENABLE_QUEUE=true).
+ * When the queue is off, process the payment directly in this process instead.
+ * Returns the BullMQ job id, or null when the payment was processed directly.
+ */
+async function dispatchPayment(transaction, preferredGateway, jobId = null) {
+  const transactionId = transaction._id.toString();
+  const { paymentQueue, QUEUE_ENABLED } =
+    await import("../config/paymentQueue.js");
+
+  if (QUEUE_ENABLED && paymentQueue) {
+    const job = await paymentQueue.add(
+      "process-payment",
+      { transactionId, preferredGateway },
+      { jobId: jobId || `payment-${transactionId}` },
+    );
+
+    return job.id;
+  }
+
+  // Queue disabled: run the payment now. The processor records success or
+  // failure on the transaction itself, so errors are logged, not rethrown.
+  const { processPaymentJob } = await import("./paymentWorker.js");
+
+  try {
+    await processPaymentJob({
+      id: `direct-${transactionId}`,
+      data: { transactionId, preferredGateway },
+    });
+  } catch (error) {
+    console.error(`Direct payment ${transactionId} failed: ${error.message}`);
+  }
+
+  return null;
+}
+
 function getMonthName(month) {
   return new Date(2000, month - 1, 1).toLocaleString("default", {
     month: "long",
@@ -160,6 +196,26 @@ class PayrollService {
         throw new Error("No active employees found");
       }
 
+      // Staff loans are under review: no loan deductions unless switched on
+      const loansEnabled = process.env.ENABLE_STAFF_LOANS === "true";
+      const hasFinancing =
+        loansEnabled &&
+        (await subscriptionService.hasActiveSubscription(
+          companyId,
+          "financing",
+        ));
+      const activeLoans = hasFinancing
+        ? await EmployeeLoan.find({
+            company: companyId,
+            status: "active",
+            employee: { $in: employees.map((e) => e._id) },
+          }).session(session)
+        : [];
+
+      const loanByEmployee = new Map(
+        activeLoans.map((l) => [l.employee.toString(), l]),
+      );
+
       const payrollItems = [];
 
       for (const employee of employees) {
@@ -198,42 +254,54 @@ class PayrollService {
 
         const effectiveOvertime = existingItem?.additions?.overtime || 0;
 
+        // Tax is calculated on taxable earnings only.
+        // Overtime is deliberately NOT passed in: it is paid untaxed.
         const calculation = taxCalculationService.calculateEmployeePayroll({
           grossSalary: effectiveBaseSalary,
           currency: employee.salary.currency,
           allowances: effectiveAllowances,
           bonuses: effectiveBonus,
-          // BUG FIX: overtime was computed above but never actually
-          // passed in here, so it never made it into the gross/net
-          // calculation. Confirm calculateEmployeePayroll accepts
-          // this field the same way it does bonuses/allowances.
-          overtime: effectiveOvertime,
           otherDeductions: existingItem?.deductions?.otherDeductions || [],
           taxRelief: employee.taxInformation?.taxRelief || null,
         });
+
+        // Overtime is added after tax
+        const payBeforeLoan = calculation.netSalary + effectiveOvertime;
+
+        const loan = loanByEmployee.get(employee._id.toString());
+        const loanRepayment = loan
+          ? Math.round(
+              Math.max(
+                0,
+                Math.min(
+                  loan.monthlyInstallment,
+                  loan.outstandingBalance,
+                  payBeforeLoan,
+                ),
+              ) * 100,
+            ) / 100
+          : 0;
 
         payrollItems.push({
           employee: employee._id,
 
           baseSalary: effectiveBaseSalary,
 
-          grossSalary: calculation.grossSalary,
+          grossSalary: calculation.grossSalary + effectiveOvertime,
 
           deductions: {
             tax: calculation.deductions.tax,
             pension: calculation.deductions.pension,
             nhf: calculation.deductions.nhf,
+            loanRepayment,
+            loan: loanRepayment > 0 ? loan._id : undefined,
             otherDeductions: calculation.deductions.otherDeductions,
           },
 
           additions: {
             bonus: calculation.additions.bonuses,
             allowances: calculation.additions.allowances,
-            // BUG FIX: was hardcoded to 0, wiping out any overtime
-            // that had been added via addPayrollCompensation.
-            // Falls back to the pre-calculation value if the tax
-            // service doesn't echo overtime back in its result.
-            overtime: calculation.additions.overtime ?? effectiveOvertime,
+            overtime: effectiveOvertime,
           },
 
           employerContributions: {
@@ -243,7 +311,7 @@ class PayrollService {
             nsitf: calculation.employerContributions.nsitf,
           },
 
-          netSalary: calculation.netSalary,
+          netSalary: Math.round((payBeforeLoan - loanRepayment) * 100) / 100,
 
           paymentStatus: "pending",
 
@@ -269,7 +337,8 @@ class PayrollService {
             sum +
             item.deductions.tax +
             item.deductions.pension +
-            item.deductions.nhf,
+            item.deductions.nhf +
+            (item.deductions.loanRepayment || 0),
           0,
         ),
 
@@ -391,17 +460,6 @@ class PayrollService {
     return payroll;
   }
 
-  /**
-   * Process payroll payment
-   *
-   * One payroll creates multiple individual payment transactions.
-   * BullMQ then processes those transactions independently.
-   *
-   * preferredGateway:
-   * - flutterwave
-   * - monnify
-   * - null = automatic priority
-   */
   async processPayroll(
     payrollId,
     companyId,
@@ -443,6 +501,7 @@ class PayrollService {
        * Never create another active/success transaction
        * for the same payroll.
        */
+
       const existingTransactions = await PaymentTransaction.find({
         payroll: payrollId,
         company: companyId,
@@ -457,10 +516,6 @@ class PayrollService {
         );
       }
 
-      /**
-       * If old failed transactions exist, they must go
-       * through retryFailedPayments() instead.
-       */
       const oldFailedTransactions = await PaymentTransaction.find({
         payroll: payrollId,
         company: companyId,
@@ -473,13 +528,6 @@ class PayrollService {
         );
       }
 
-      /**
-       * Validate every employee BEFORE changing the payroll
-       * to processing.
-       *
-       * This prevents one employee from being left stuck
-       * in processing because of missing bank information.
-       */
       for (const item of payroll.payrollItems) {
         const employee = item.employee;
 
@@ -562,8 +610,6 @@ class PayrollService {
        */
       await session.endSession();
 
-      const { paymentQueue } = await import("../config/paymentQueue.js");
-
       const queuedTransactions = [];
 
       /**
@@ -578,13 +624,6 @@ class PayrollService {
             `${employee._id.toString().slice(-8)}-` +
             `${Date.now().toString(36)}`;
 
-          /**
-           * Store preferred gateway.
-           *
-           * Worker can still automatically fall back to
-           * the other gateway if the preferred gateway
-           * cannot initiate the transfer.
-           */
           const transaction = await PaymentTransaction.create({
             company: companyId,
             payroll: payrollId,
@@ -611,23 +650,16 @@ class PayrollService {
           });
 
           /**
-           * Add payment to BullMQ.
+           * Queue the payment in BullMQ, or process it directly
+           * when the queue is disabled.
            */
-          const job = await paymentQueue.add(
-            "process-payment",
-            {
-              transactionId: transaction._id.toString(),
+          const jobId = await dispatchPayment(transaction, preferredGateway);
 
-              preferredGateway,
-            },
-            {
-              jobId: `payment-${transaction._id.toString()}`,
-            },
-          );
+          if (jobId) {
+            transaction.queueJobId = jobId;
 
-          transaction.queueJobId = job.id;
-
-          await transaction.save();
+            await transaction.save();
+          }
 
           queuedTransactions.push(transaction);
         } catch (paymentError) {
@@ -673,10 +705,6 @@ class PayrollService {
         }
       }
 
-      /**
-       * If absolutely nothing was queued, the payroll
-       * cannot continue.
-       */
       if (queuedTransactions.length === 0) {
         await Payroll.findOneAndUpdate(
           {
@@ -692,9 +720,6 @@ class PayrollService {
         throw new Error("No payroll payments could be queued.");
       }
 
-      /**
-       * Return the latest payroll.
-       */
       return await Payroll.findById(payrollId);
     } catch (error) {
       if (session.inTransaction()) {
@@ -703,14 +728,6 @@ class PayrollService {
 
       await session.endSession();
 
-      /**
-       * IMPORTANT:
-       * Only change approved -> failed here.
-       *
-       * If the database transaction already committed and
-       * queue creation later fails, don't incorrectly
-       * convert a processing payroll back to failed.
-       */
       await Payroll.findOneAndUpdate(
         {
           _id: payrollId,
@@ -737,6 +754,82 @@ class PayrollService {
 
       throw error;
     }
+  }
+
+  async removeEmployeeFromOpenPayrolls(employeeId, companyId, userId) {
+    const payrolls = await Payroll.find({
+      company: companyId,
+      status: { $in: ["draft", "calculated", "approved"] },
+      "payrollItems.employee": employeeId,
+    });
+
+    for (const payroll of payrolls) {
+      const previousStatus = payroll.status;
+
+      payroll.payrollItems = payroll.payrollItems.filter(
+        (item) => item.employee.toString() !== employeeId.toString(),
+      );
+
+      const items = payroll.payrollItems;
+      const total = (fn) => items.reduce((sum, item) => sum + fn(item), 0);
+
+      payroll.summary = {
+        totalGross: total((i) => i.grossSalary || 0),
+        totalDeductions: total(
+          (i) =>
+            (i.deductions?.tax || 0) +
+            (i.deductions?.pension || 0) +
+            (i.deductions?.nhf || 0) +
+            (i.deductions?.loanRepayment || 0),
+        ),
+        totalAdditions: total(
+          (i) =>
+            (i.additions?.bonus || 0) +
+            (i.additions?.overtime || 0) +
+            (i.additions?.allowances || []).reduce(
+              (s, a) => s + (a.amount || 0),
+              0,
+            ),
+        ),
+        totalNet: total((i) => i.netSalary || 0),
+        totalEmployerContributions: total(
+          (i) =>
+            (i.employerContributions?.pension || 0) +
+            (i.employerContributions?.nhis || 0) +
+            (i.employerContributions?.itf || 0) +
+            (i.employerContributions?.nsitf || 0),
+        ),
+        totalEmployees: items.length,
+      };
+
+      if (previousStatus !== "draft") {
+        payroll.status = "draft";
+        payroll.approvedBy = undefined;
+        payroll.approvedAt = undefined;
+      }
+
+      await payroll.save();
+
+      await Audit.log({
+        company: companyId,
+        user: userId,
+        action: "payroll_item_corrected",
+        module: "payroll",
+        resourceType: "payroll",
+        resourceId: payroll._id,
+        details: {
+          action: "employee_removed_after_delete",
+          employeeId,
+          previousStatus,
+          month: payroll.payrollPeriod.month,
+          year: payroll.payrollPeriod.year,
+        },
+        status: "success",
+        severity: "medium",
+      });
+    }
+
+    return payrolls.length;
   }
 
   /**
@@ -1042,32 +1135,31 @@ class PayrollService {
         0,
       );
 
-      item.grossSalary =
+      // Tax applies to taxable earnings only; overtime is paid untaxed
+      const taxableGross =
         item.baseSalary + item.additions.bonus + totalAllowances;
+      const overtime = item.additions.overtime || 0;
+      item.grossSalary = taxableGross + overtime;
 
       const recalculated = taxCalculationService.calculateEmployeePayroll({
-        grossSalary: item.grossSalary,
-
+        grossSalary: taxableGross,
         currency: payroll.currency,
-
         allowances: item.additions.allowances,
-
         bonuses: item.additions.bonus,
-
-        overtime: item.deductions.overtime,
-
         otherDeductions: item.deductions.otherDeductions,
       });
 
       item.deductions.tax = recalculated.deductions.tax;
-
       item.deductions.pension = recalculated.deductions.pension;
-
       item.deductions.nhf = recalculated.deductions.nhf;
-
       item.employerContributions = recalculated.employerContributions;
 
-      item.netSalary = recalculated.netSalary;
+      item.netSalary = Math.max(
+        0,
+        recalculated.netSalary +
+          overtime -
+          (item.deductions.loanRepayment || 0),
+      );
 
       payroll.summary.totalGross = payroll.payrollItems.reduce(
         (sum, currentItem) => sum + currentItem.grossSalary,
@@ -1079,7 +1171,8 @@ class PayrollService {
           sum +
           currentItem.deductions.tax +
           currentItem.deductions.pension +
-          currentItem.deductions.nhf,
+          currentItem.deductions.nhf +
+          (currentItem.deductions.loanRepayment || 0),
         0,
       );
 
@@ -1162,7 +1255,6 @@ class PayrollService {
     companyId,
     compensationItems,
     userId,
-    
   ) {
     const session = await mongoose.startSession();
 
@@ -1302,11 +1394,6 @@ class PayrollService {
     employeeId,
     paymentReference,
   ) {
-    // BUG FIX: this previously looked up by _id only, with no
-    // companyId scoping — every other method in this service scopes
-    // by { _id, company } to prevent one company from touching
-    // another company's payroll data. Added the companyId param and
-    // the filter to match. Update the call site to pass companyId.
     const payroll = await Payroll.findOne({
       _id: payrollId,
       company: companyId,
@@ -1325,24 +1412,54 @@ class PayrollService {
       throw new Error("Payroll item not found");
     }
 
-    item.paymentStatus = "paid";
-    item.paymentDate = new Date();
-    item.paymentReference = paymentReference;
+    // A repeated webhook must not rewrite the payment record
+    if (item.paymentStatus !== "paid") {
+      item.paymentStatus = "paid";
+      item.paymentDate = new Date();
+      item.paymentReference = paymentReference;
+      await payroll.save();
+    }
 
-    await payroll.save();
+    await this.applyLoanRepayment(item, payrollId, companyId, paymentReference);
 
     return payroll;
   }
 
-  /**
-   * Retry failed payments.
-   *
-   * Works for:
-   * - failed payrolls
-   * - processing payrolls with mixed outcomes
-   *
-   * Does NOT use partially_completed.
-   */
+  async applyLoanRepayment(item, payrollId, companyId, paymentReference) {
+    const repayment = item.deductions?.loanRepayment || 0;
+    const loanId = item.deductions?.loan;
+    if (repayment <= 0 || !loanId) return;
+
+    await EmployeeLoan.findOneAndUpdate(
+      {
+        _id: loanId,
+        company: companyId,
+        "repayments.payroll": { $ne: payrollId },
+      },
+      {
+        $inc: { amountRepaid: repayment, outstandingBalance: -repayment },
+        $push: {
+          repayments: {
+            payroll: payrollId,
+            amount: repayment,
+            paymentReference,
+          },
+        },
+      },
+    );
+
+    // Close the loan once it's fully repaid
+    await EmployeeLoan.updateOne(
+      {
+        _id: loanId,
+        company: companyId,
+        status: "active",
+        outstandingBalance: { $lte: 0.01 },
+      },
+      { status: "completed" },
+    );
+  }
+
   async retryFailedPayments(
     payrollId,
     companyId,
@@ -1371,11 +1488,24 @@ class PayrollService {
       );
     }
 
-    const failedTransactions = await PaymentTransaction.find({
+    let failedTransactions = await PaymentTransaction.find({
       payroll: payrollId,
       company: companyId,
       status: "failed",
     });
+
+    // Never retry an employee who was already paid in this payroll
+    const paid = await PaymentTransaction.find({
+      payroll: payrollId,
+      company: companyId,
+      status: "success",
+    })
+      .select("employee")
+      .lean();
+    const paidIds = new Set(paid.map((t) => t.employee.toString()));
+    failedTransactions = failedTransactions.filter(
+      (t) => !paidIds.has(t.employee.toString()),
+    );
 
     if (failedTransactions.length === 0) {
       throw new Error("No failed transactions found for this payroll.");
@@ -1433,8 +1563,6 @@ class PayrollService {
       severity: "high",
     });
 
-    const { paymentQueue } = await import("../config/paymentQueue.js");
-
     let retriedCount = 0;
 
     for (const transaction of failedTransactions) {
@@ -1452,6 +1580,7 @@ class PayrollService {
         transaction.attemptCount = 0;
 
         transaction.failureReason = null;
+        transaction.failureNotifiedAt = null;
         transaction.gatewayMessage = null;
         transaction.gatewayTransferId = null;
 
@@ -1468,21 +1597,23 @@ class PayrollService {
           transaction.gateway = preferredGateway;
         }
 
-        const job = await paymentQueue.add(
-          "process-payment",
-          {
-            transactionId: transaction._id.toString(),
+        /**
+         * Save the reset (pending) state BEFORE dispatching so the
+         * payment processor always sees the up-to-date transaction.
+         */
+        await transaction.save();
 
-            preferredGateway,
-          },
-          {
-            jobId: `payment-${transaction._id}-retry-${Date.now()}`,
-          },
+        const jobId = await dispatchPayment(
+          transaction,
+          preferredGateway,
+          `payment-${transaction._id}-retry-${Date.now()}`,
         );
 
-        transaction.queueJobId = job.id;
+        if (jobId) {
+          transaction.queueJobId = jobId;
 
-        await transaction.save();
+          await transaction.save();
+        }
 
         retriedCount++;
       } catch (error) {
@@ -1584,7 +1715,7 @@ class PayrollService {
      * be removed BEFORE changing anything.
      */
     for (const transaction of pendingTransactions) {
-      if (!transaction.queueJobId) {
+      if (!paymentQueue || !transaction.queueJobId) {
         continue;
       }
 
@@ -1618,7 +1749,7 @@ class PayrollService {
      * Remove queue jobs.
      */
     for (const transaction of pendingTransactions) {
-      if (!transaction.queueJobId) {
+      if (!paymentQueue || !transaction.queueJobId) {
         continue;
       }
 
@@ -1758,7 +1889,11 @@ class PayrollService {
 
     for (const transaction of resettableTransactions) {
       // Remove queued payment jobs that have not started yet.
-      if (transaction.status === "pending" && transaction.queueJobId) {
+      if (
+        paymentQueue &&
+        transaction.status === "pending" &&
+        transaction.queueJobId
+      ) {
         const job = await paymentQueue.getJob(transaction.queueJobId);
 
         if (job) {

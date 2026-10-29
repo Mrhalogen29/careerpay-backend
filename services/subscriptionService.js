@@ -4,28 +4,53 @@ import Subscription from "../models/subscriptionModel.js";
 import Audit from "../models/auditModel.js";
 
 // Module pricing in USD
-const MODULE_PRICES = {
+export const MODULE_PRICES = {
   payroll: 20,
   financing: 15,
   esop: 20,
 };
 
-class SubscriptionService {
-  /**
-   * Fetch live USD/NGN exchange rate
-   */
-  async getExchangeRate() {
-    try {
-      const response = await axios.get(
-        `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE_API_KEY}/pair/USD/NGN`
-      );
+// Keeps pricing working when the rate provider is slow, rate-limited or down.
+const RATE_TTL_MS = 60 * 60 * 1000;
+let cachedRate = null; // { value, fetchedAt }
 
-      if (response.data.result !== "success") {
-        throw new Error("Failed to fetch exchange rate");
+class SubscriptionService {
+  async getExchangeRate() {
+    const now = Date.now();
+
+    if (cachedRate && now - cachedRate.fetchedAt < RATE_TTL_MS) {
+      return cachedRate.value;
+    }
+
+    try {
+      if (!process.env.EXCHANGE_RATE_API_KEY) {
+        throw new Error("EXCHANGE_RATE_API_KEY is not set");
       }
 
-      return response.data.conversion_rate;
+      const response = await axios.get(
+        `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE_API_KEY}/pair/USD/NGN`,
+        { timeout: 8000 },
+      );
+
+      const rate = Number(response.data?.conversion_rate);
+      if (response.data?.result !== "success" || !(rate > 0)) {
+        throw new Error("Provider returned an invalid rate");
+      }
+
+      cachedRate = { value: rate, fetchedAt: now };
+      return rate;
     } catch (error) {
+      console.error("Exchange rate fetch failed:", error.message);
+
+      // Stale but real beats nothing
+      if (cachedRate) return cachedRate.value;
+
+      const fallback = Number(process.env.FALLBACK_USD_NGN_RATE);
+      if (fallback > 0) {
+        console.warn(`Using FALLBACK_USD_NGN_RATE=${fallback}`);
+        return fallback;
+      }
+
       throw new Error(`Exchange rate fetch failed: ${error.message}`);
     }
   }
@@ -83,7 +108,7 @@ class SubscriptionService {
             Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
             "Content-Type": "application/json",
           },
-        }
+        },
       );
 
       if (!response.data || response.data.status !== "success") {
@@ -116,13 +141,19 @@ class SubscriptionService {
           headers: {
             Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
           },
-        }
+        },
       );
 
       const transaction = response.data.data;
 
-      if (!response.data || response.data.status !== "success" || transaction.status !== "successful") {
-        throw new Error("Payment verification failed or payment not successful");
+      if (
+        !response.data ||
+        response.data.status !== "success" ||
+        transaction.status !== "successful"
+      ) {
+        throw new Error(
+          "Payment verification failed or payment not successful",
+        );
       }
 
       // Extract metadata saved during initiation
@@ -227,7 +258,7 @@ class SubscriptionService {
             createdBy: userId,
           },
         ],
-        { session }
+        { session },
       );
 
       subscription = created[0];
@@ -278,7 +309,7 @@ class SubscriptionService {
           status: "active",
           endDate: { $lte: now },
         },
-        { status: "expired" }
+        { status: "expired" },
       );
 
       const subscriptions = await Subscription.find({
@@ -292,14 +323,14 @@ class SubscriptionService {
 
       for (const mod of modules) {
         const active = subscriptions.find(
-          (s) => s.module === mod && s.status === "active"
+          (s) => s.module === mod && s.status === "active",
         );
         summary[mod] = active
           ? {
               status: "active",
               endDate: active.endDate,
               daysRemaining: Math.ceil(
-                (new Date(active.endDate) - now) / (1000 * 60 * 60 * 24)
+                (new Date(active.endDate) - now) / (1000 * 60 * 60 * 24),
               ),
             }
           : { status: "inactive" };
@@ -330,7 +361,7 @@ class SubscriptionService {
       }
 
       const daysRemaining = Math.ceil(
-        (new Date(subscription.endDate) - now) / (1000 * 60 * 60 * 24)
+        (new Date(subscription.endDate) - now) / (1000 * 60 * 60 * 24),
       );
 
       return {

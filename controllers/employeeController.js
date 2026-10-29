@@ -1,17 +1,16 @@
 import axios from "axios";
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 
 import Employee from "../models/employeeModel.js";
 import User from "../models/userModel.js";
 import Company from "../models/companyModel.js";
+import EmployeeLoan from "../models/employeeLoanModel.js";
 import Audit from "../models/auditModel.js";
 import emailService from "../services/emailService.js";
+import payrollService from "../services/payrollService.js";
 
-/**
- * Validates bank details against BRD rules and custom validations.
- *
- * Warnings (non-blocking):
- * - Account name doesn't contain employee's first or last name
- */
 function validateBankDetails(bankDetails, firstName, lastName) {
   const errors = [];
   const warnings = [];
@@ -86,6 +85,7 @@ class EmployeeController {
         bankDetails,
         taxInformation,
         manager,
+        nextOfKin,
       } = req.body;
 
       // Validate required fields
@@ -93,6 +93,7 @@ class EmployeeController {
         !email ||
         !firstName ||
         !lastName ||
+        !phone ||
         !position ||
         !startDate ||
         !salary?.amount
@@ -110,6 +111,23 @@ class EmployeeController {
           message:
             "Phone must be in +234XXXXXXXXXX format (e.g. +2348012345678)",
         });
+      }
+
+      // Next of kin: if either part is given, both are needed, and the phone must be valid
+      if (nextOfKin && (nextOfKin.name || nextOfKin.phone)) {
+        if (!nextOfKin.name?.trim() || !nextOfKin.phone?.trim()) {
+          return res.status(400).json({
+            success: false,
+            message: "Next of kin needs both a name and a phone number",
+          });
+        }
+        if (!validatePhoneFormat(nextOfKin.phone.trim())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Next of kin phone must be in +234XXXXXXXXXX format (e.g. +2348012345678)",
+          });
+        }
       }
 
       // Start date cannot be in the future
@@ -159,7 +177,8 @@ class EmployeeController {
       }
 
       // Generate temporary password
-      const temporaryPassword = Math.random().toString(36).slice(-8) + "Aa1!";
+      const temporaryPassword =
+        crypto.randomBytes(9).toString("base64url") + "Aa1!";
 
       // Create user account for employee
       const user = await User.create({
@@ -170,6 +189,7 @@ class EmployeeController {
         phone,
         role: "employee",
         company: companyId,
+        mustChangePassword: true,
       });
 
       // Create employee record
@@ -188,6 +208,9 @@ class EmployeeController {
         bankDetails,
         taxInformation,
         manager,
+        nextOfKin: nextOfKin?.name
+          ? { name: nextOfKin.name.trim(), phone: nextOfKin.phone.trim() }
+          : undefined,
       });
 
       // Log audit
@@ -231,6 +254,9 @@ class EmployeeController {
           warnings: bankValidation.warnings,
         }),
 
+        // DEV ONLY: shows the temporary password when email isn't set up
+        ...(process.env.NODE_ENV !== "production" && { temporaryPassword }),
+
         data: {
           employee,
           user: {
@@ -273,9 +299,10 @@ class EmployeeController {
       const limit = Math.min(parseInt(req.query.limit) || 20, 100);
       const skip = (parseInt(page) - 1) * limit;
 
-      // Initial match — only this company's employees
+      // Initial match — only this company's employees, never deleted ones
       const matchStage = {
         company: companyId,
+        isDeleted: { $ne: true },
       };
 
       if (department) {
@@ -462,6 +489,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       })
         .populate(
           "user",
@@ -479,7 +507,8 @@ class EmployeeController {
 
       // Field-level access control
       const role = req.user.role;
-      const isOwnProfile = employee.user._id.toString() === req.user.id;
+      const isOwnProfile =
+        employee.user._id.toString() === req.user.id.toString();
 
       // Employees can view their own profile
       if (role === "employee" && isOwnProfile) {
@@ -494,6 +523,7 @@ class EmployeeController {
             salary: employee.salary,
             bankDetails: employee.bankDetails,
             taxInformation: employee.taxInformation,
+            nextOfKin: employee.nextOfKin,
             user: {
               firstName: employee.user.firstName,
               lastName: employee.user.lastName,
@@ -532,6 +562,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       });
 
       if (!employee) {
@@ -550,6 +581,7 @@ class EmployeeController {
         "taxInformation",
         "manager",
         "status",
+        "nextOfKin",
       ];
 
       // Validate bank details when updating them
@@ -643,6 +675,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       });
 
       if (!employee) {
@@ -653,7 +686,7 @@ class EmployeeController {
       }
 
       // Employee can only update their own profile
-      if (employee.user.toString() !== userId) {
+      if (employee.user.toString() !== userId.toString()) {
         return res.status(403).json({
           success: false,
           message: "You can only update your own profile",
@@ -743,6 +776,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       });
 
       if (!employee) {
@@ -811,6 +845,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       });
 
       if (!employee) {
@@ -865,8 +900,209 @@ class EmployeeController {
   }
 
   /**
+   * Change an employee's access role (founder only)
+   * PATCH /api/employees/:id/role    Body: { role: "hr" | "admin" | "employee" }
+   */
+  async updateRole(req, res) {
+    try {
+      const companyId = req.user.company;
+      const { id } = req.params;
+      const { role } = req.body;
+
+      const assignable = ["employee", "hr", "admin"];
+      if (!assignable.includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: `Role must be one of: ${assignable.join(", ")}`,
+        });
+      }
+
+      const employee = await Employee.findOne({
+        _id: id,
+        company: companyId,
+        isDeleted: { $ne: true },
+      });
+      if (!employee) {
+        return res.status(404).json({
+          success: false,
+          message: "Employee not found",
+        });
+      }
+
+      if (employee.user.toString() === req.user.id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot change your own role",
+        });
+      }
+
+      const target = await User.findOne({
+        _id: employee.user,
+        company: companyId,
+      });
+      if (!target) {
+        return res.status(404).json({
+          success: false,
+          message: "User account not found",
+        });
+      }
+      if (target.role === "founder") {
+        return res.status(403).json({
+          success: false,
+          message: "The founder's role cannot be changed",
+        });
+      }
+
+      const previousRole = target.role;
+      target.role = role;
+      await target.save();
+
+      await Audit.log({
+        company: companyId,
+        user: req.user.id,
+        action: "employee_role_changed",
+        module: "employee",
+        resourceType: "employee",
+        resourceId: employee._id,
+        details: { previousRole, newRole: role },
+        ipAddress: req.ip,
+        userAgent: req.get("user-agent"),
+        status: "success",
+        severity: "high",
+      }).catch(() => {});
+
+      return res.status(200).json({
+        success: true,
+        message: `Role updated to ${role}`,
+      });
+    } catch (error) {
+      console.error("Update role error:", error);
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to update role",
+      });
+    }
+  }
+
+  /**
+   * Upload optional Government ID / Tax Form
+   * POST /api/employees/:id/documents
+   */
+  async uploadDocuments(req, res) {
+    try {
+      const employee = await Employee.findOne({
+        _id: req.params.id,
+        company: req.user.company,
+      });
+      if (!employee) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Employee not found" });
+      }
+
+      const files = req.files || {};
+      const keys = ["governmentId", "taxForm"].filter((k) => files[k]?.[0]);
+      if (keys.length === 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "No document was provided" });
+      }
+
+      const dir = path.join(
+        process.cwd(),
+        "uploads",
+        "employees",
+        String(req.user.company),
+      );
+
+      for (const key of keys) {
+        // Replacing a document: delete the old file from disk first
+        const old = employee.documents.find((d) => d.docType === key);
+        if (old) {
+          fs.promises.unlink(path.join(dir, old.storedName)).catch(() => {});
+        }
+        employee.documents = employee.documents.filter(
+          (d) => d.docType !== key,
+        );
+
+        const f = files[key][0];
+        employee.documents.push({
+          docType: key,
+          originalName: f.originalname,
+          storedName: f.filename,
+          mimeType: f.mimetype,
+          size: f.size,
+        });
+      }
+
+      await employee.save();
+      res.status(200).json({ success: true, message: "Documents uploaded" });
+    } catch (error) {
+      console.error("Upload documents error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "Failed to upload documents" });
+    }
+  }
+
+  /**
+   * View one document (authenticated, never a public URL)
+   * GET /api/employees/:id/documents/:docType
+   */
+  async downloadDocument(req, res) {
+    try {
+      const employee = await Employee.findOne({
+        _id: req.params.id,
+        company: req.user.company,
+      });
+      if (!employee) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Employee not found" });
+      }
+
+      // HR and above may open anyone's; an employee only their own
+      const role = String(req.user.role).toLowerCase();
+      const isStaff = ["founder", "admin", "hr"].includes(role);
+      if (!isStaff && String(employee.user) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, message: "Not allowed" });
+      }
+
+      const doc = employee.documents.find(
+        (d) => d.docType === req.params.docType,
+      );
+      if (!doc) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Document not found" });
+      }
+
+      const filePath = path.join(
+        process.cwd(),
+        "uploads",
+        "employees",
+        String(req.user.company),
+        path.basename(doc.storedName), // basename blocks "../" tricks
+      );
+      res.type(doc.mimeType);
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${doc.originalName.replace(/"/g, "")}"`,
+      );
+      res.sendFile(filePath);
+    } catch (error) {
+      console.error("Download document error:", error);
+      res
+        .status(500)
+        .json({ success: false, message: "Failed to fetch document" });
+    }
+  }
+
+  /**
    * Delete employee (soft delete)
    * DELETE /api/employees/:id
+   *
+   * Blocked while the employee has an active loan.
    */
   async deleteEmployee(req, res) {
     try {
@@ -877,6 +1113,7 @@ class EmployeeController {
       const employee = await Employee.findOne({
         _id: id,
         company: companyId,
+        isDeleted: { $ne: true },
       });
 
       if (!employee) {
@@ -886,17 +1123,66 @@ class EmployeeController {
         });
       }
 
-      // Soft delete — deactivate employee
+      // An employee with an unpaid loan cannot be deleted
+      const activeLoan = await EmployeeLoan.findOne({
+        company: companyId,
+        employee: employee._id,
+        status: "active",
+      });
+      if (activeLoan) {
+        const owed = Number(
+          activeLoan.outstandingBalance || 0,
+        ).toLocaleString();
+        return res.status(400).json({
+          success: false,
+          message: `This employee still owes ₦${owed} on an active loan. Settle it before deactivating.`,
+        });
+      }
+
       employee.isActive = false;
+
+      // Don't delete someone whose salary is being paid right now
+      const Payroll = (await import("../models/payrollModel.js")).default;
+      const inFlight = await Payroll.exists({
+        company: companyId,
+        status: "processing",
+        "payrollItems.employee": employee._id,
+      });
+      if (inFlight) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This employee is part of a payroll that is currently being processed. Wait for it to finish before deleting.",
+        });
+      }
+
+      // Soft delete — hide from lists and deactivate
+      employee.isActive = false;
+      employee.isDeleted = true;
+      employee.deletedAt = new Date();
       employee.terminationDate = new Date();
       employee.terminationReason = "Deleted by admin";
 
       await employee.save();
 
-      // Deactivate user
+      // Deactivate user so they can no longer log in
       await User.findByIdAndUpdate(employee.user, {
         isActive: false,
       });
+
+      // Remove from any open payroll so they cannot be paid
+      let removedFromPayrolls = 0;
+      try {
+        removedFromPayrolls =
+          await payrollService.removeEmployeeFromOpenPayrolls(
+            employee._id,
+            companyId,
+            userId,
+          );
+      } catch (payrollError) {
+        // Delete already succeeded; the approve/process guard still blocks payment
+        console.error("Failed to clean payroll after delete:", payrollError);
+      }
 
       // Log audit
       await Audit.log({
@@ -918,6 +1204,7 @@ class EmployeeController {
       return res.status(200).json({
         success: true,
         message: "Employee deleted successfully",
+        removedFromPayrolls,
       });
     } catch (error) {
       console.error("Delete employee error:", error);
@@ -946,10 +1233,12 @@ class EmployeeController {
       ] = await Promise.all([
         Employee.countDocuments({
           company: companyId,
+          isDeleted: { $ne: true },
         }),
 
         Employee.countDocuments({
           company: companyId,
+          isDeleted: { $ne: true },
           isActive: true,
         }),
 
@@ -957,6 +1246,7 @@ class EmployeeController {
           {
             $match: {
               company: companyId,
+              isDeleted: { $ne: true },
               isActive: true,
             },
           },
@@ -979,6 +1269,7 @@ class EmployeeController {
           {
             $match: {
               company: companyId,
+              isDeleted: { $ne: true },
               isActive: true,
             },
           },
@@ -994,6 +1285,7 @@ class EmployeeController {
 
         Employee.find({
           company: companyId,
+          isDeleted: { $ne: true },
           isActive: true,
         })
           .sort({
@@ -1069,7 +1361,7 @@ class EmployeeController {
 
       return res.status(500).json({
         success: false,
-        message: error.message || "Failed to fetch Nigerian banks",
+        message: "Failed to fetch Nigerian banks",
       });
     }
   }

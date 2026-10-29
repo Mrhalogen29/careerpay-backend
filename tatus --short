@@ -1,0 +1,27 @@
+ app.js                                |  20 [31m-[m
+ config/paymentQueue.js                |  69 [32m++[m[31m-[m
+ controllers/authController.js         |  96 [32m+[m[31m---[m
+ controllers/employeeController.js     | 318 [32m++++++++++[m[31m-[m
+ controllers/notificationController.js |   6 [32m+[m[31m-[m
+ controllers/payrollController.js      | 307 [32m++++[m[31m-------[m
+ controllers/subscriptionController.js | 162 [32m+++++[m[31m-[m
+ middlewares/requireSubscription.js    |   6 [32m+[m[31m-[m
+ models/companyModel.js                | 309 [32m+++++[m[31m------[m
+ models/employeeModel.js               |  28 [32m+[m[31m-[m
+ models/paymentTransactionModel.js     |   3 [32m+[m
+ models/payrollModel.js                |   3 [32m+[m
+ models/userModel.js                   |  18 [32m+[m[31m-[m
+ package-lock.json                     | 114 [32m+++[m[31m-[m
+ package.json                          |   6 [32m+[m[31m-[m
+ routes/companyRoutes.js               |  61 [32m++[m[31m-[m
+ routes/employeeRoutes.js              |  75 [32m+[m[31m--[m
+ routes/index.js                       |  39 [32m+[m[31m-[m
+ routes/subscriptionRoutes.js          |  89 [32m+[m[31m--[m
+ server.js                             |  29 [32m+[m[31m-[m
+ services/authService.js               | 981 [32m+++++++++++++++++++[m[31m---------------[m
+ services/emailService.js              | 130 [32m+++[m[31m--[m
+ services/paymentWorker.js             | 412 [32m++++++++[m[31m------[m
+ services/payrollService.js            | 383 [32m++++++++[m[31m-----[m
+ services/reconciliationWorker.js      | 239 [32m+++++[m[31m----[m
+ services/subscriptionService.js       |  67 [32m++[m[31m-[m
+ 26 files changed, 2413 insertions(+), 1557 deletions(-)

@@ -73,26 +73,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// Temporary endpoint to check Render's outbound public IP
-app.get("/api/debug/outbound-ip", async (req, res) => {
-  try {
-    const response = await fetch("https://api.ipify.org?format=json");
-    const data = await response.json();
-
-    res.json({
-      success: true,
-      outboundIP: data.ip,
-    });
-  } catch (error) {
-    console.error("Outbound IP check failed:", error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
 // 404 handler
 
 app.use(notFound);

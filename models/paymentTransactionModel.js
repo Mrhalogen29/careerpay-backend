@@ -70,6 +70,8 @@ const paymentTransactionSchema = new mongoose.Schema(
       type: String,
     },
 
+    failureNotifiedAt: { type: Date, default: null },
+
     // Number of times payment has been attempted
     attemptCount: {
       type: Number,
@@ -108,6 +110,7 @@ const paymentTransactionSchema = new mongoose.Schema(
       required: true,
     },
   },
+
   {
     timestamps: true,
   },

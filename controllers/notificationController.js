@@ -49,7 +49,11 @@ class NotificationController {
       const { id } = req.params;
 
       const notification = await Notification.findOneAndUpdate(
-        { _id: id, company: companyId },
+        {
+          _id: id,
+          company: companyId,
+          $or: [{ user: req.user.id }, { user: null }],
+        },
         { isRead: true },
         { new: true },
       );

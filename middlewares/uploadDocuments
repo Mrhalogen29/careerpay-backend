@@ -1,0 +1,50 @@
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import crypto from "crypto";
+
+const EXT = {
+  "application/pdf": ".pdf",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+};
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(
+      process.cwd(),
+      "uploads",
+      "employees",
+      String(req.user.company),
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  // Random name: guessable names or ones containing "../" are a classic attack.
+  filename: (req, file, cb) =>
+    cb(null, `${crypto.randomUUID()}${EXT[file.mimetype]}`),
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 2 }, // 5 MB each, max 2 files
+  fileFilter: (req, file, cb) =>
+    EXT[file.mimetype]
+      ? cb(null, true)
+      : cb(new Error("Only PDF, JPG or PNG files are allowed")),
+}).fields([
+  { name: "governmentId", maxCount: 1 },
+  { name: "taxForm", maxCount: 1 },
+]);
+
+export const uploadEmployeeDocs = (req, res, next) =>
+  upload(req, res, (err) => {
+    if (err) {
+      const message =
+        err.code === "LIMIT_FILE_SIZE"
+          ? "Each file must be 5 MB or smaller"
+          : err.message;
+      return res.status(400).json({ success: false, message });
+    }
+    next();
+  });

@@ -1,11 +1,6 @@
 import subscriptionService from "../services/subscriptionService.js";
 import Subscription from "../models/subscriptionModel.js";
 
-/**
- * Middleware factory — checks if company has active subscription for a module
- * Expired companies get read-only access (GET allowed, mutations blocked)
- * Companies with no subscription ever are blocked completely
- */
 const requireSubscription = (module) => {
   return async (req, res, next) => {
     if (process.env.DISABLE_SUBSCRIPTION_CHECK === "true") {
@@ -24,6 +19,7 @@ const requireSubscription = (module) => {
       }
 
       // No active subscription — check if they ever had one (read-only access)
+
       const hadSubscription = await Subscription.findOne({
         company: companyId,
         module,

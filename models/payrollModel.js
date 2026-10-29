@@ -24,6 +24,9 @@ const payrollItemSchema = new mongoose.Schema({
     tax: { type: Number, default: 0 },
     pension: { type: Number, default: 0 },
     nhf: { type: Number, default: 0 },
+    loanRepayment: { type: Number, default: 0 },
+    loan: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeLoan" },
+
     otherDeductions: [
       {
         name: String,
